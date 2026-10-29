@@ -1,4 +1,3 @@
-
 import os
 import sys
 import json
@@ -118,8 +117,7 @@ app = FastAPI(
     version="1.0",
 )
 
-# Allow the React/Vite development frontend to contact FastAPI.
-# Use the exact frontend origin shown in your Vite terminal.
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -127,6 +125,7 @@ app.add_middleware(
         "http://localhost:5174",
         "http://127.0.0.1:5173",
         "http://127.0.0.1:5174",
+        "https://smart-grid-ascon.vercel.app",
     ],
     allow_credentials=False,
     allow_methods=["*"],
@@ -142,15 +141,26 @@ def startup():
 def user(authorization: str = Header(default="")):
     token = authorization.removeprefix("Bearer ").strip()
 
-    if token not in TOKENS:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+    if token in TOKENS:
+        return TOKENS[token]
 
-    return TOKENS[token]
+    # Public access for simulated academic demonstrations only.
+    # Configure DEMO_MODE=true in Render to enable this mode.
+    if (
+        not token
+        and os.environ.get("DEMO_MODE", "false").lower() == "true"
+    ):
+        return ("demo", "admin")
+
+    raise HTTPException(status_code=401, detail="Not authenticated")
 
 
 def admin(u=Depends(user)):
     if u[1] != "admin":
-        raise HTTPException(status_code=403, detail="Administrator role required")
+        raise HTTPException(
+            status_code=403,
+            detail="Administrator role required",
+        )
     return u
 
 
@@ -168,7 +178,9 @@ def login(b: Login):
         ).fetchone()
 
         try:
-            ok = bool(record) and ph.verify(record["pw_hash"], b.password)
+            ok = bool(record) and ph.verify(
+                record["pw_hash"], b.password
+            )
         except Exception:
             ok = False
 
@@ -190,7 +202,10 @@ def login(b: Login):
     token = secrets.token_urlsafe(32)
     TOKENS[token] = (record["username"], record["role"])
 
-    return {"token": token, "role": record["role"]}
+    return {
+        "token": token,
+        "role": record["role"],
+    }
 
 
 @app.post("/api/auth/logout")
@@ -218,7 +233,13 @@ class MeterIn(BaseModel):
 def public_meter(r):
     return {
         k: r[k]
-        for k in ("meter_id", "name", "location", "enabled", "simulated")
+        for k in (
+            "meter_id",
+            "name",
+            "location",
+            "enabled",
+            "simulated",
+        )
     }
 
 
@@ -227,7 +248,9 @@ def meters(u=Depends(user)):
     with db() as c:
         return [
             public_meter(r)
-            for r in c.execute("SELECT * FROM meters ORDER BY meter_id")
+            for r in c.execute(
+                "SELECT * FROM meters ORDER BY meter_id"
+            )
         ]
 
 
@@ -238,22 +261,35 @@ def add_meter(m: MeterIn, u=Depends(admin)):
             "SELECT 1 FROM meters WHERE meter_id = ?",
             (m.meter_id,),
         ).fetchone():
-            raise HTTPException(status_code=409, detail="Meter ID already exists")
+            raise HTTPException(
+                status_code=409,
+                detail="Meter ID already exists",
+            )
 
         c.execute(
-            "INSERT INTO meters(meter_id, name, location, created) VALUES (?, ?, ?, ?)",
+            """INSERT INTO meters
+            (meter_id, name, location, created)
+            VALUES (?, ?, ?, ?)""",
             (m.meter_id, m.name, m.location, time.time()),
         )
+
         c.execute(
             "INSERT INTO meter_keys(meter_id, k) VALUES (?, ?)",
             (m.meter_id, secrets.token_bytes(16)),
         )
+
         log(
-            c, m.meter_id, "meter_registered",
-            "Simulated meter registered", "success"
+            c,
+            m.meter_id,
+            "meter_registered",
+            "Simulated meter registered",
+            "success",
         )
 
-    return {"meter_id": m.meter_id, "key_provisioned": True}
+    return {
+        "meter_id": m.meter_id,
+        "key_provisioned": True,
+    }
 
 
 @app.delete("/api/meters/{mid}")
@@ -265,7 +301,10 @@ def delete_meter(mid: str, u=Depends(admin)):
         ).rowcount
 
     if not n:
-        raise HTTPException(status_code=404, detail="Unknown meter")
+        raise HTTPException(
+            status_code=404,
+            detail="Unknown meter",
+        )
 
     return {"deleted": mid}
 
@@ -295,18 +334,31 @@ def begin(b: Begin, u=Depends(user)):
     try:
         cm = bytes.fromhex(b.cm)
     except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid challenge encoding")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid challenge encoding",
+        )
 
     if len(cm) != 16:
-        raise HTTPException(status_code=400, detail="Challenge must be 16 bytes")
+        raise HTTPException(
+            status_code=400,
+            detail="Challenge must be 16 bytes",
+        )
 
     with db() as c:
         if key_for(c, b.meter_id) is None:
             log(
-                c, b.meter_id, "unknown_meter",
-                "Unknown or disabled meter", "rejected", "high"
+                c,
+                b.meter_id,
+                "unknown_meter",
+                "Unknown or disabled meter",
+                "rejected",
+                "high",
             )
-            raise HTTPException(status_code=404, detail="Unknown meter")
+            raise HTTPException(
+                status_code=404,
+                detail="Unknown meter",
+            )
 
         sid = secrets.token_hex(16)
         cs = secrets.token_bytes(16)
@@ -315,10 +367,20 @@ def begin(b: Begin, u=Depends(user)):
             """INSERT INTO sessions
             (sid, meter_id, cs, cm, expires, state)
             VALUES (?, ?, ?, ?, ?, 'pending')""",
-            (sid, b.meter_id, cs, cm, time.time() + TTL()),
+            (
+                sid,
+                b.meter_id,
+                cs,
+                cm,
+                time.time() + TTL(),
+            ),
         )
 
-    return {"session_id": sid, "cs": cs.hex(), "ttl": TTL()}
+    return {
+        "session_id": sid,
+        "cs": cs.hex(),
+        "ttl": TTL(),
+    }
 
 
 class Respond(BaseModel):
@@ -344,11 +406,18 @@ def respond(b: Respond, u=Depends(user)):
         k = key_for(c, mid)
 
         if k is None:
-            raise HTTPException(status_code=404, detail="Unknown meter")
+            raise HTTPException(
+                status_code=404,
+                detail="Unknown meter",
+            )
 
-        x = ctx(mid, b.session_id, s["cs"], s["cm"])
+        x = ctx(
+            mid,
+            b.session_id,
+            s["cs"],
+            s["cm"],
+        )
 
-        # A challenge is single-use, including after failed attempts.
         c.execute(
             "UPDATE sessions SET state = 'used' WHERE sid = ?",
             (b.session_id,),
@@ -357,10 +426,18 @@ def respond(b: Respond, u=Depends(user)):
 
         if time.time() > s["expires"]:
             log(
-                c, mid, "auth_failed", "Challenge expired",
-                "rejected", "warning", b.session_id
+                c,
+                mid,
+                "auth_failed",
+                "Challenge expired",
+                "rejected",
+                "warning",
+                b.session_id,
             )
-            raise HTTPException(status_code=401, detail="Challenge expired")
+            raise HTTPException(
+                status_code=401,
+                detail="Challenge expired",
+            )
 
         try:
             rm = bytes.fromhex(b.rm)
@@ -369,20 +446,36 @@ def respond(b: Respond, u=Depends(user)):
 
         if not crypto.eq(rm, crypto.mac(k, b"M" + x)):
             log(
-                c, mid, "auth_failed", "Invalid meter response",
-                "rejected", "high", b.session_id
+                c,
+                mid,
+                "auth_failed",
+                "Invalid meter response",
+                "rejected",
+                "high",
+                b.session_id,
             )
-            raise HTTPException(status_code=401, detail="Invalid response")
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid response",
+            )
 
         ks = crypto.mac(k, b"K" + x)
 
         c.execute(
-            "UPDATE sessions SET state = 'authenticated', ks = ? WHERE sid = ?",
+            """UPDATE sessions
+            SET state = 'authenticated', ks = ?
+            WHERE sid = ?""",
             (ks, b.session_id),
         )
+
         log(
-            c, mid, "auth_success",
-            "Mutual authentication completed", "success", "info", b.session_id
+            c,
+            mid,
+            "auth_success",
+            "Mutual authentication completed",
+            "success",
+            "info",
+            b.session_id,
         )
 
     return {
@@ -395,7 +488,10 @@ def sim_meter_auth(mid, k, tamper_rm=False):
     cm = secrets.token_bytes(16)
 
     sess = begin(
-        Begin(meter_id=mid, cm=cm.hex()),
+        Begin(
+            meter_id=mid,
+            cm=cm.hex(),
+        ),
         ("sim", "admin"),
     )
 
@@ -404,11 +500,15 @@ def sim_meter_auth(mid, k, tamper_rm=False):
     x = ctx(mid, sid, cs, cm)
 
     rm = crypto.mac(k, b"M" + x)
+
     if tamper_rm:
         rm = bytes(16)
 
     out = respond(
-        Respond(session_id=sid, rm=rm.hex()),
+        Respond(
+            session_id=sid,
+            rm=rm.hex(),
+        ),
         ("sim", "admin"),
     )
 
@@ -436,7 +536,10 @@ def authenticate(b: Begin, u=Depends(user)):
         "session_id": sid,
         "server_verified_by_meter": ok,
         "authenticated": ok,
-        "elapsed_ms": round((time.perf_counter() - start) * 1000, 2),
+        "elapsed_ms": round(
+            (time.perf_counter() - start) * 1000,
+            2,
+        ),
     }
 
 
@@ -448,21 +551,35 @@ class Msg(BaseModel):
 
 
 def aad(m):
-    return f"{VER}|{m.meter_id}|{m.session_id}|{m.seq}".encode()
+    return (
+        f"{VER}|{m.meter_id}|{m.session_id}|{m.seq}"
+    ).encode()
 
 
 def nonce(seq):
     if seq < 0 or seq >= 2**128:
         raise ValueError("Invalid sequence number")
+
     return seq.to_bytes(16, "big")
 
 
 def build(mid, sid, ks, seq, reading):
-    m = Msg(meter_id=mid, session_id=sid, seq=seq, ct="")
+    m = Msg(
+        meter_id=mid,
+        session_id=sid,
+        seq=seq,
+        ct="",
+    )
+
     plaintext = json.dumps(reading).encode()
+
     m.ct = crypto.aead_encrypt(
-        ks, nonce(seq), aad(m), plaintext
+        ks,
+        nonce(seq),
+        aad(m),
+        plaintext,
     ).hex()
+
     return m
 
 
@@ -470,76 +587,121 @@ def build(mid, sid, ks, seq, reading):
 def verify(m: Msg, u=Depends(user)):
     with db() as c:
         s = c.execute(
-            "SELECT * FROM sessions WHERE sid = ? AND meter_id = ?",
+            """SELECT * FROM sessions
+            WHERE sid = ? AND meter_id = ?""",
             (m.session_id, m.meter_id),
         ).fetchone()
 
         if key_for(c, m.meter_id) is None:
             log(
-                c, m.meter_id, "unknown_meter",
-                "Message from unknown meter", "rejected", "high"
+                c,
+                m.meter_id,
+                "unknown_meter",
+                "Message from unknown meter",
+                "rejected",
+                "high",
             )
-            raise HTTPException(status_code=404, detail="Unknown meter")
+            raise HTTPException(
+                status_code=404,
+                detail="Unknown meter",
+            )
 
         if not s or s["state"] != "authenticated":
             log(
-                c, m.meter_id, "auth_failed",
-                "No authenticated session", "rejected", "warning"
+                c,
+                m.meter_id,
+                "auth_failed",
+                "No authenticated session",
+                "rejected",
+                "warning",
             )
             raise HTTPException(
-                status_code=401, detail="No authenticated session"
+                status_code=401,
+                detail="No authenticated session",
             )
 
         if m.seq <= s["last_seq"]:
             log(
-                c, m.meter_id, "replay",
+                c,
+                m.meter_id,
+                "replay",
                 f"Replay or old sequence {m.seq}",
-                "rejected", "high", m.session_id
+                "rejected",
+                "high",
+                m.session_id,
             )
-            raise HTTPException(status_code=409, detail="Replay detected")
+            raise HTTPException(
+                status_code=409,
+                detail="Replay detected",
+            )
 
         try:
             plaintext = crypto.aead_decrypt(
-                s["ks"], nonce(m.seq), aad(m), bytes.fromhex(m.ct)
+                s["ks"],
+                nonce(m.seq),
+                aad(m),
+                bytes.fromhex(m.ct),
             )
         except (ValueError, TypeError):
             plaintext = None
 
         if plaintext is None:
             log(
-                c, m.meter_id, "tampered",
+                c,
+                m.meter_id,
+                "tampered",
                 "Authentication tag verification failed",
-                "rejected", "high", m.session_id
+                "rejected",
+                "high",
+                m.session_id,
             )
             raise HTTPException(
-                status_code=400, detail="Tag verification failed"
+                status_code=400,
+                detail="Tag verification failed",
             )
 
         try:
             reading = json.loads(plaintext)
         except (ValueError, UnicodeDecodeError):
-            raise HTTPException(status_code=400, detail="Invalid reading payload")
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid reading payload",
+            )
 
         c.execute(
             "UPDATE sessions SET last_seq = ? WHERE sid = ?",
             (m.seq, m.session_id),
         )
+
         c.execute(
             """INSERT INTO readings
             (meter_id, sid, seq, kwh, voltage, current, ts)
             VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (
-                m.meter_id, m.session_id, m.seq,
-                reading["kwh"], reading["voltage"],
-                reading["current"], time.time(),
+                m.meter_id,
+                m.session_id,
+                m.seq,
+                reading["kwh"],
+                reading["voltage"],
+                reading["current"],
+                time.time(),
             ),
         )
+
         log(
-            c, m.meter_id, "reading_accepted",
-            "Reading verified and decrypted", "success", "info", m.session_id
+            c,
+            m.meter_id,
+            "reading_accepted",
+            "Reading verified and decrypted",
+            "success",
+            "info",
+            m.session_id,
         )
 
-    return {"verified": True, "reading": reading}
+    return {
+        "verified": True,
+        "reading": reading,
+    }
 
 
 class Tx(BaseModel):
@@ -554,19 +716,25 @@ def next_msg(t: Tx):
     with db() as c:
         s = c.execute(
             """SELECT ks, last_seq FROM sessions
-            WHERE sid = ? AND meter_id = ? AND state = 'authenticated'""",
+            WHERE sid = ? AND meter_id = ?
+            AND state = 'authenticated'""",
             (t.session_id, t.meter_id),
         ).fetchone()
 
     if not s:
-        raise HTTPException(status_code=401, detail="No authenticated session")
+        raise HTTPException(
+            status_code=401,
+            detail="No authenticated session",
+        )
 
     return build(
         t.meter_id,
         t.session_id,
         s["ks"],
         s["last_seq"] + 1,
-        t.model_dump(include={"kwh", "voltage", "current"}),
+        t.model_dump(
+            include={"kwh", "voltage", "current"}
+        ),
     )
 
 
@@ -596,7 +764,9 @@ def case(name, initial, action, expected, fn):
         "expected": expected,
         "actual": actual,
         "ts": time.time(),
-        "result": "PASS" if actual.startswith("rejected") else "FAIL",
+        "result": (
+            "PASS" if actual.startswith("rejected") else "FAIL"
+        ),
     }
 
 
@@ -605,7 +775,10 @@ def fresh(mid):
         k = key_for(c, mid)
 
     if k is None:
-        raise HTTPException(status_code=404, detail="Unknown meter")
+        raise HTTPException(
+            status_code=404,
+            detail="Unknown meter",
+        )
 
     sid, _, _ = sim_meter_auth(mid, k)
     return sid
@@ -618,14 +791,20 @@ class Sim(BaseModel):
 @app.post("/api/simulation/tamper")
 def sim_tamper(b: Sim, u=Depends(user)):
     sid = fresh(b.meter_id)
+
     m = next_msg(
         Tx(
-            meter_id=b.meter_id, session_id=sid,
-            kwh=1, voltage=230, current=5,
+            meter_id=b.meter_id,
+            session_id=sid,
+            kwh=1,
+            voltage=230,
+            current=5,
         )
     )
 
-    m.ct = m.ct[:-2] + ("00" if m.ct[-2:] != "00" else "01")
+    m.ct = m.ct[:-2] + (
+        "00" if m.ct[-2:] != "00" else "01"
+    )
 
     return case(
         "Message tampering",
@@ -639,10 +818,14 @@ def sim_tamper(b: Sim, u=Depends(user)):
 @app.post("/api/simulation/replay")
 def sim_replay(b: Sim, u=Depends(user)):
     sid = fresh(b.meter_id)
+
     m = next_msg(
         Tx(
-            meter_id=b.meter_id, session_id=sid,
-            kwh=1, voltage=230, current=5,
+            meter_id=b.meter_id,
+            session_id=sid,
+            kwh=1,
+            voltage=230,
+            current=5,
         )
     )
 
@@ -665,7 +848,11 @@ def sim_unknown(u=Depends(user)):
         "Requested a session",
         "Rejected",
         lambda: begin(
-            Begin(meter_id="GHOST-999", cm="00" * 16), u
+            Begin(
+                meter_id="GHOST-999",
+                cm="00" * 16,
+            ),
+            u,
         ),
     )
 
@@ -676,14 +863,21 @@ def sim_invalid(b: Sim, u=Depends(user)):
         k = key_for(c, b.meter_id)
 
     if k is None:
-        raise HTTPException(status_code=404, detail="Unknown meter")
+        raise HTTPException(
+            status_code=404,
+            detail="Unknown meter",
+        )
 
     return case(
         "Invalid challenge-response",
         "Valid challenge issued",
         "Sent incorrect response",
         "Rejected",
-        lambda: sim_meter_auth(b.meter_id, k, tamper_rm=True),
+        lambda: sim_meter_auth(
+            b.meter_id,
+            k,
+            tamper_rm=True,
+        ),
     )
 
 
@@ -693,11 +887,19 @@ def sim_expired(b: Sim, u=Depends(user)):
         k = key_for(c, b.meter_id)
 
     if k is None:
-        raise HTTPException(status_code=404, detail="Unknown meter")
+        raise HTTPException(
+            status_code=404,
+            detail="Unknown meter",
+        )
 
     cm = secrets.token_bytes(16)
+
     session = begin(
-        Begin(meter_id=b.meter_id, cm=cm.hex()), u
+        Begin(
+            meter_id=b.meter_id,
+            cm=cm.hex(),
+        ),
+        u,
     )
 
     sid = session["session_id"]
@@ -708,7 +910,12 @@ def sim_expired(b: Sim, u=Depends(user)):
             (time.time() - 1, sid),
         )
 
-    x = ctx(b.meter_id, sid, bytes.fromhex(session["cs"]), cm)
+    x = ctx(
+        b.meter_id,
+        sid,
+        bytes.fromhex(session["cs"]),
+        cm,
+    )
 
     return case(
         "Expired challenge",
@@ -742,29 +949,39 @@ def logs(type: str = "", u=Depends(user)):
 @app.get("/api/dashboard/summary")
 def summary(u=Depends(user)):
     with db() as c:
+
         def count(query):
             return c.execute(query).fetchone()[0]
 
         return {
-            "meters": count("SELECT COUNT(*) FROM meters"),
+            "meters": count(
+                "SELECT COUNT(*) FROM meters"
+            ),
             "auth_ok": count(
-                "SELECT COUNT(*) FROM events WHERE type = 'auth_success'"
+                """SELECT COUNT(*) FROM events
+                WHERE type = 'auth_success'"""
             ),
             "auth_failed": count(
-                "SELECT COUNT(*) FROM events WHERE type = 'auth_failed'"
+                """SELECT COUNT(*) FROM events
+                WHERE type = 'auth_failed'"""
             ),
             "rejected": count(
                 """SELECT COUNT(*) FROM events
-                WHERE type IN ('tampered','replay','unknown_meter')"""
+                WHERE type IN
+                ('tampered','replay','unknown_meter')"""
             ),
-            "readings": count("SELECT COUNT(*) FROM readings"),
+            "readings": count(
+                "SELECT COUNT(*) FROM readings"
+            ),
             "data_source": "simulated",
         }
 
 
 if __name__ == "__main__" and sys.argv[1:2] == ["create-admin"]:
     if len(sys.argv) != 4:
-        print("Usage: python app.py create-admin USERNAME PASSWORD")
+        print(
+            "Usage: python app.py create-admin USERNAME PASSWORD"
+        )
         sys.exit(1)
 
     create_user(sys.argv[2], sys.argv[3])
